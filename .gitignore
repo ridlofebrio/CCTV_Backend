@@ -1,0 +1,5 @@
+.env
+video-test/
+.venv/
+.ipynb_checkpoints/
+*.pt
