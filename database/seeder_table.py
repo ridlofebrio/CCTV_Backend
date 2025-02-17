@@ -16,6 +16,18 @@ conn = psycopg2.connect(
 cursor = conn.cursor()
 
 try:
+    # Wrap truncates in a transaction
+    clear_data = """
+    BEGIN;
+        TRUNCATE TABLE detection, ppa, cctv CASCADE;
+        ALTER SEQUENCE detection_id_seq RESTART WITH 1;
+        ALTER SEQUENCE ppa_id_seq RESTART WITH 1;
+        ALTER SEQUENCE cctv_id_seq RESTART WITH 1;
+    COMMIT;
+    """
+    
+    cursor.execute(clear_data)
+
     # Seed data CCTV
     cctv_data = [
         ('Hikvision', 'Gedung A', 1, '(106.8456,-6.2088)'),
