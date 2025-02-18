@@ -50,12 +50,12 @@ CONFIDENCE_THRESHOLD = 0.5
 _stream_handlers = {}
 _handlers_lock = threading.Lock()
 
-DETECTION_COOLDOWN = 5  # seconds between same violation detections
+DETECTION_COOLDOWN = 30  # seconds between same violation detections
 last_detection_time = defaultdict(float)
 
-
-
-
+RECORD_DURATION = 20  # seconds to record after violation
+RECORD_FPS = 30
+PLAYBACK_FOLDER = "Playback"
 
 def cleanup_handlers(max_idle_time=30):
     """Membersihkan handler yang tidak aktif"""
@@ -237,7 +237,7 @@ def process_video(input_path, frame_width=1536, frame_height=864):
                     # Check for PPE violations
                     elif label.startswith('NO-'):
                         violation_detected = True
-                        save_violation_to_db(cursor, label, confidence, timestamp)
+                        save_violation_to_db(cursor, label, confidence, timestamp, cap)  # Pass cap object
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                         cv2.putText(frame, f"{label} ({confidence:.2f})", (x1, y1 - 10),
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
@@ -256,7 +256,7 @@ def process_video(input_path, frame_width=1536, frame_height=864):
 
                 # Only save if there's a violation (has id_ppa)
                 if violation_detected:
-                    save_violation_to_db(cursor, label, confidence, timestamp)
+                    save_violation_to_db(cursor, label, confidence, timestamp, cap)
                     conn.commit()
 
             # Display the frame
@@ -287,52 +287,84 @@ def convert_label_to_ppa(label):
     }
     return label_map.get(label)
 
-# Update the save_violation_to_db function definition
-def save_violation_to_db(cursor, label, confidence=None, timestamp=None):
-    """Save PPE violation to database with cooldown"""
+# Add this new function to record violations
+def record_violation_video(frame, cap, label, timestamp):
+    """Records video for specified duration when violation is detected"""
+    try:
+        # Create filename with timestamp
+        video_filename = f"Pelanggaran_{label}_{timestamp}.mp4"
+        video_path = os.path.join(PLAYBACK_FOLDER, video_filename)
+        
+        # Ensure directory exists
+        os.makedirs(PLAYBACK_FOLDER, exist_ok=True)
+        
+        # Get original video properties
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Initialize video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(video_path, fourcc, RECORD_FPS, 
+                            (frame_width, frame_height))
+        
+        # Calculate frames to capture
+        frames_to_capture = RECORD_DURATION * RECORD_FPS
+        frames_captured = 0
+        
+        # Start recording
+        while frames_captured < frames_to_capture:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            # Add violation label to frame
+            cv2.putText(frame, f"Pelanggaran : {label}", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            
+            out.write(frame)
+            frames_captured += 1
+            
+            # Display recording progress
+            cv2.imshow('Recording Violation', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        
+        out.release()
+        return video_path
+        
+    except Exception as e:
+        logging.error(f"Error recording violation video: {str(e)}")
+        return None
+
+# Update save_violation_to_db function
+def save_violation_to_db(cursor, label, confidence=None, timestamp=None, cap=None):
+    """Save PPE violation to database with cooldown and video recording"""
     global last_detection_time
     
     current_time = time.time()
     ppa_label = convert_label_to_ppa(label)
     
     if ppa_label:
-        # Check if enough time has passed since last detection of this violation type
         if current_time - last_detection_time[ppa_label] >= DETECTION_COOLDOWN:
+            # Record violation video
+            video_path = None
+            if cap is not None:
+                video_path = record_violation_video(None, cap, ppa_label, 
+                                                 datetime.now().strftime('%Y%m%d_%H%M%S'))
+            
+            # Save to database with video path
             cursor.execute("""
             INSERT INTO detection (id_cctv, id_ppa, deteksi_jatuh, deteksi_overtime, link_playback)
             VALUES (1, 
                    (SELECT id FROM ppa WHERE label = %s LIMIT 1),
                    false,
                    0,
-                   NULL)
-            """, (ppa_label,))
-            # Update last detection time for this violation type
+                   %s)
+            """, (ppa_label, video_path))
+            
+            # Update last detection time
             last_detection_time[ppa_label] = current_time
 
-# def process_max_consecutive_count(cursor, person_counts, start_time, end_time):
-#     """Process and save maximum consecutive person count"""
-#     if person_counts:
-#         max_person_count = None
-#         consecutive_count = 1
-
-#         for i in range(1, len(person_counts)):
-#             if person_counts[i] == person_counts[i - 1]:
-#                 consecutive_count += 1
-#             else:
-#                 consecutive_count = 1
-
-#             if consecutive_count > 15:
-#                 if max_person_count is None or person_counts[i] > max_person_count:
-#                     max_person_count = person_counts[i]
-
-#         if max_person_count is not None:
-#             cursor.execute("""
-#             INSERT INTO person_count_max (max_value, start_time, end_time, cctv_id)
-#             VALUES (%s, %s, %s, 1)
-#             """, (max_person_count, start_time, end_time))
-#             print(f"Maximum person count that appeared more than 15 times consecutively: {max_person_count}")
-#         else:
-#             print("No person count appeared more than 15 times consecutively.")
 
 if __name__ == "__main__":
     video_path = 'video-test\huuman.mp4'
