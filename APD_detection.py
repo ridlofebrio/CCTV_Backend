@@ -1,7 +1,7 @@
 import os
 import cv2 # type: ignore
 from ultralytics import YOLO # type: ignore
-from flask import current_app
+from flask import current_app # type: ignore
 from database.database import get_db
 import time
 import threading
@@ -13,15 +13,25 @@ from datetime import timedelta, datetime
 from dotenv import load_dotenv
 from collections import defaultdict
 import time
+import torch # type: ignore
 
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
+# Pastikan CUDA tersedia
+print(f"Using CUDA: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU Device: {torch.cuda.get_device_name(0)}")
+
+torch.cuda.empty_cache()  # Bersihkan CUDA memory
+torch.backends.cudnn.benchmark = True  # Optimalkan cudnn
+
 # Load YOLO model
 model_path = "Model\ppe.pt"
 model = YOLO(model_path)
+model.to('cuda')  # Pindahkan model ke GPU
 
 LABEL_MAP = {
     0: 'Hardhat',
@@ -35,7 +45,6 @@ LABEL_MAP = {
     8: 'machinery',
     9: 'vehicle'
 }
-
 CONFIDENCE_THRESHOLD = 0.5
 
 _stream_handlers = {}
@@ -45,162 +54,7 @@ DETECTION_COOLDOWN = 5  # seconds between same violation detections
 last_detection_time = defaultdict(float)
 
 
-class RTSPStreamHandler:
-    def __init__(self, source, model, buffer_size=30):
-        self.source = source
-        self.model = model
-        self.frame_buffer = queue.Queue(maxsize=buffer_size)
-        self.processed_frame = None
-        self.last_frame = None
-        self.running = False
-        self.lock = threading.Lock()
-        self.last_access = time.time()
 
-    def start(self):
-        self.running = True
-        self.capture_thread = threading.Thread(target=self._capture_frames)
-        self.process_thread = threading.Thread(target=self._process_frames)
-        self.capture_thread.daemon = True
-        self.process_thread.daemon = True
-        self.capture_thread.start()
-        self.process_thread.start()
-
-    def stop(self):
-        self.running = False
-        if hasattr(self, 'capture_thread'):
-            self.capture_thread.join(timeout=1.0)
-        if hasattr(self, 'process_thread'):
-            self.process_thread.join(timeout=1.0)
-
-    def _capture_frames(self):
-        try:
-            cap = cv2.VideoCapture(self.source)
-            if not cap.isOpened():
-                logging.error(f"Tidak dapat membuka stream RTSP: {self.source}")
-                return
-            
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-
-            retry_count = 0
-            max_retries = 5
-            
-            while self.running:
-                ret, frame = cap.read()
-                if not ret:
-                    retry_count += 1
-                    logging.warning(f"Gagal membaca frame, percobaan ke-{retry_count}")
-                    if retry_count > max_retries:
-                        logging.error("Melebihi batas maksimum percobaan, menghentikan stream")
-                        break
-                    sleep(1)
-                    continue
-                
-                retry_count = 0  # Reset counter jika berhasil
-                
-                with self.lock:
-                    self.last_frame = frame.copy()
-                    self.last_access = time.time()
-
-                if not self.frame_buffer.full():
-                    self.frame_buffer.put(frame)
-                
-        except Exception as e:
-            logging.error(f"Error pada _capture_frames: {str(e)}")
-        finally:
-            if cap:
-                cap.release()
-
-    def _process_frames(self):
-        while self.running:
-            try:
-                frame = self.frame_buffer.get(timeout=1)
-                if frame is None:
-                    continue
-                
-                processed_frame = frame.copy()
-                results = self.model(frame, stream=False)
-                
-                # Tambahkan variabel untuk menandai ada pelanggaran
-                has_violation = False
-                
-                for result in results:
-                    if not hasattr(result, "boxes") or result.boxes is None:
-                        continue
-                        
-                    for box in result.boxes:
-                        try:
-                            confidence = float(box.conf[0].item())
-                            class_id = int(box.cls[0].item())
-                            
-                            if confidence < CONFIDENCE_THRESHOLD:
-                                continue
-                                
-                            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                            label = LABEL_MAP.get(class_id, f"Unknown-{class_id}")
-                            
-                            # Cek pelanggaran APD
-                            is_violation = check_apd_violation(label)
-                            if is_violation:
-                                has_violation = True
-                            
-                            # Tentukan warna berdasarkan pelanggaran APD
-                            color = (0, 0, 255) if is_violation else (0, 255, 0)
-                            
-                            # Gambar bounding box dan label
-                            cv2.rectangle(processed_frame, (x1, y1), (x2, y2), color, 2)
-                            cv2.putText(
-                                processed_frame,
-                                f"{label} ({confidence:.2f})",
-                                (x1, max(0, y1 - 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5,
-                                color,
-                                2
-                            )
-                            
-                            # Simpan deteksi pelanggaran ke database
-                            if is_violation:
-                                save_detection_to_db(None, label, confidence)
-                                
-                        except Exception as e:
-                            logging.error(f"Error processing box: {str(e)}")
-                            continue
-                
-                # Tambahkan border merah jika ada pelanggaran
-                if has_violation:
-                    border_thickness = 10
-                    h, w = processed_frame.shape[:2]
-                    # Gambar border merah di sekeliling frame
-                    cv2.rectangle(processed_frame, (0,0), (w,h), (0,0,255), border_thickness)
-                    
-                with self.lock:
-                    self.processed_frame = processed_frame
-                    self.last_access = time.time()
-                    
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logging.error(f"Error processing frame: {str(e)}")
-                continue
-
-
-    def get_frame(self):
-        with self.lock:
-            self.last_access = time.time()
-            if self.processed_frame is not None:
-                return self.processed_frame
-            return self.last_frame if self.last_frame is not None else None
-
-
-def get_stream_handler(video_source, model):
-    """Helper function untuk mendapatkan atau membuat stream handler"""
-    with _handlers_lock:
-        handler = _stream_handlers.get(video_source)
-        if handler is None or not handler.running:
-            handler = RTSPStreamHandler(video_source, model)
-            handler.start()
-            _stream_handlers[video_source] = handler
-        return handler
 
 
 def cleanup_handlers(max_idle_time=30):
@@ -217,25 +71,6 @@ def cleanup_handlers(max_idle_time=30):
             del _stream_handlers[source]
 
 
-def generate_frames(video_source):
-    handler = get_stream_handler(video_source, model)
-    
-    while True:
-        try:
-            frame = handler.get_frame()
-            if frame is None:
-                continue
-                
-            # Encode frame ke format JPEG
-            _, buffer = cv2.imencode('.jpg', frame)
-            frame_bytes = buffer.tobytes()
-            
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                   
-        except Exception as e:
-            logging.error(f"Kesalahan saat memproses frame: {str(e)}")
-            break
 
 
 def save_frame_with_bbox(frame, frame_count, user_id):
@@ -370,7 +205,8 @@ def process_video(input_path, frame_width=1536, frame_height=864):
             timestamp = str(timedelta(seconds=seconds)).split('.')[0]
 
             # Detect and track objects
-            results = model.track(frame, persist=True)
+            with torch.cuda.amp.autocast():  # Gunakan mixed precision
+                results = model.track(frame, persist=True, device=0)  # device=0 untuk GPU
 
             # Process detections
             if results and len(results) > 0:
@@ -427,7 +263,7 @@ def process_video(input_path, frame_width=1536, frame_height=864):
             cv2.imshow('Frame', frame)
 
         # Calculate max consecutive count
-        process_max_consecutive_count(cursor, person_counts, start_time, datetime.now())
+        # process_max_consecutive_count(cursor, person_counts, start_time, datetime.now())
 
         # Cleanup
         cap.release()
