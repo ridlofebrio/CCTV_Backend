@@ -50,7 +50,7 @@ CONFIDENCE_THRESHOLD = 0.5
 _stream_handlers = {}
 _handlers_lock = threading.Lock()
 
-DETECTION_COOLDOWN = 30  # seconds between same violation detections
+DETECTION_COOLDOWN = 60  # seconds between same violation detections
 last_detection_time = defaultdict(float)
 
 RECORD_DURATION = 20  # seconds to record after violation
@@ -237,10 +237,16 @@ def process_video(input_path, frame_width=1536, frame_height=864):
                     # Check for PPE violations
                     elif label.startswith('NO-'):
                         violation_detected = True
-                        save_violation_to_db(cursor, label, confidence, timestamp, cap)  # Pass cap object
+                        save_violation_to_db(
+                            cursor, 
+                            label, 
+                            confidence,  # Pass confidence score
+                            timestamp, 
+                            cap
+                        )
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                         cv2.putText(frame, f"{label} ({confidence:.2f})", (x1, y1 - 10),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
                 # Update person count
                 person_count = len(person_boxes)
@@ -352,15 +358,27 @@ def save_violation_to_db(cursor, label, confidence=None, timestamp=None, cap=Non
                 video_path = record_violation_video(None, cap, ppa_label, 
                                                  datetime.now().strftime('%Y%m%d_%H%M%S'))
             
-            # Save to database with video path
+            # Save to database with video path and confidence
             cursor.execute("""
-            INSERT INTO detection (id_cctv, id_ppa, deteksi_jatuh, deteksi_overtime, link_playback)
-            VALUES (1, 
-                   (SELECT id FROM ppa WHERE label = %s LIMIT 1),
-                   false,
-                   0,
-                   %s)
-            """, (ppa_label, video_path))
+            INSERT INTO detection (
+                id_cctv, 
+                id_ppa, 
+                deteksi_jatuh, 
+                deteksi_overtime, 
+                link_playback,
+                timestamp,
+                confidan
+            )
+            VALUES (
+                1, 
+                (SELECT id FROM ppa WHERE label = %s LIMIT 1),
+                false,
+                0,
+                %s,
+                CURRENT_TIMESTAMP,
+                %s
+            )
+            """, (ppa_label, video_path, confidence))
             
             # Update last detection time
             last_detection_time[ppa_label] = current_time
