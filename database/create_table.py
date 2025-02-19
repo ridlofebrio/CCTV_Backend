@@ -16,6 +16,21 @@ conn = psycopg2.connect(
 cursor = conn.cursor()
 
 try:
+    # Drop existing tables and types in correct order
+    cursor.execute("""
+    DO $$ 
+    BEGIN
+        -- Drop tables if they exist
+        DROP TABLE IF EXISTS detection CASCADE;
+        DROP TABLE IF EXISTS ppa CASCADE;
+        DROP TABLE IF EXISTS cctv CASCADE;
+        
+        -- Drop enum type if exists
+        DROP TYPE IF EXISTS ppa_label CASCADE;
+    END
+    $$;
+    """)
+
     # Create cctv table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS cctv (
@@ -23,7 +38,9 @@ try:
         merek VARCHAR(100),
         gedung VARCHAR(100),
         lantai INT,
-        koordinat POINT
+        latitude DOUBLE PRECISION,
+        longitude DOUBLE PRECISION,
+        gambar VARCHAR(255)
     );
     """)
 
@@ -31,9 +48,7 @@ try:
     cursor.execute("""
     DO $$ 
     BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ppa_label') THEN
-            CREATE TYPE ppa_label AS ENUM ('Tidak Memakai Helm', 'Tidak Memakai Masker', 'Tidak Memakai Rompi');
-        END IF;
+        CREATE TYPE ppa_label AS ENUM ('Tidak Memakai Helm', 'Tidak Memakai Masker', 'Tidak Memakai Rompi');
     END
     $$;
     """)
@@ -53,15 +68,18 @@ try:
         id_ppa INT REFERENCES ppa(id) ON DELETE CASCADE,
         deteksi_jatuh BOOLEAN,
         deteksi_overtime INT,
-        link_playback VARCHAR(255)
+        link_playback VARCHAR(255),
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        confidan DOUBLE PRECISION
     );
     """)
 
     conn.commit()
-    print("Tables created successfully.")
+    print("Tables dropped and recreated successfully.")
 
 except psycopg2.Error as e:
     print(f"Database error: {e}")
+    conn.rollback()
 
 finally:
     # Close database connection

@@ -1,6 +1,8 @@
-import psycopg2 # type: ignore
+import psycopg2
 import os
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
+import random
 
 # Load environment variables
 load_dotenv()
@@ -16,7 +18,7 @@ conn = psycopg2.connect(
 cursor = conn.cursor()
 
 try:
-    # Wrap truncates in a transaction
+    # Clear existing data
     clear_data = """
     BEGIN;
         TRUNCATE TABLE detection, ppa, cctv CASCADE;
@@ -25,23 +27,22 @@ try:
         ALTER SEQUENCE cctv_id_seq RESTART WITH 1;
     COMMIT;
     """
-    
     cursor.execute(clear_data)
 
-    # Seed data CCTV
+    # Seed CCTV data
     cctv_data = [
-        ('Hikvision', 'Gedung A', 1, '(106.8456,-6.2088)'),
-        ('Dahua', 'Gedung B', 2, '(106.8457,-6.2089)'),
-        ('Axis', 'Gedung C', 1, '(106.8458,-6.2090)'),
+        ('Hikvision', 'Gedung PIP', 1, -7.205353, 112.741598, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
+        ('Dahua', 'Dock Irian', 2, -7.204889472323035, 112.73974910298983, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
+        ('Axis', 'Divisi Kapal Perang', 1, -7.205132962241805, 112.73865248258255, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
     ]
     
     insert_cctv = """
-    INSERT INTO cctv (merek, gedung, lantai, koordinat) 
-    VALUES (%s, %s, %s, POINT(%s));
+    INSERT INTO cctv (merek, gedung, lantai, latitude, longitude, gambar) 
+    VALUES (%s, %s, %s, %s, %s, %s);
     """
     cursor.executemany(insert_cctv, cctv_data)
 
-    # Seed data PPA
+    # Seed PPA data
     ppa_data = [
         ('Tidak Memakai Helm',),
         ('Tidak Memakai Masker',),
@@ -54,24 +55,45 @@ try:
     """
     cursor.executemany(insert_ppa, ppa_data)
 
-    # Seed data Detection
-    detection_data = [
-        (1, 1, True, 30, 'https://storage/video1.mp4'),
-        (2, 2, False, 45, 'https://storage/video2.mp4'),
-        (3, 3, True, 60, 'https://storage/video3.mp4'),
-    ]
+    # Generate detection data for the last 24 hours
+    detection_data = []
+    now = datetime.now()
+    start_time = now - timedelta(hours=10)
     
+    # Generate a detection every 30 minutes
+    while start_time <= now:
+        for cctv_id in range(1, 4):  # For each CCTV
+            # Randomly decide if we create a detection
+            if random.random() < 0.7:  # 70% chance of detection
+                detection = (
+                    cctv_id,  
+                    random.randint(1, 3),  # id_ppa
+                    random.choice([True, False]),  # deteksi_jatuh
+                    random.randint(0, 60),  # deteksi_overtime
+                    f'Playback/violation_{start_time.strftime("%Y%m%d_%H%M%S")}.mp4',  # link_playback
+                    start_time,  # timestamp
+                    random.uniform(0.5, 0.95)  # confidence
+                )
+                detection_data.append(detection)
+        
+        start_time += timedelta(minutes=30)
+    
+    # Insert detection data
     insert_detection = """
-    INSERT INTO detection (id_cctv, id_ppa, deteksi_jatuh, deteksi_overtime, link_playback) 
-    VALUES (%s, %s, %s, %s, %s);
+    INSERT INTO detection (
+        id_cctv, id_ppa, deteksi_jatuh, deteksi_overtime, link_playback, 
+        timestamp, confidan
+    ) 
+    VALUES (%s, %s, %s, %s, %s, %s, %s);
     """
     cursor.executemany(insert_detection, detection_data)
 
     conn.commit()
-    print("Data berhasil di-seed ke database.")
+    print(f"Data seeded successfully with {len(detection_data)} detections over the last 24 hours")
 
 except psycopg2.Error as e:
     print(f"Database error: {e}")
+    conn.rollback()
 
 finally:
     cursor.close()
