@@ -29,7 +29,7 @@ torch.cuda.empty_cache()  # Bersihkan CUDA memory
 torch.backends.cudnn.benchmark = True  # Optimalkan cudnn
 
 # Load YOLO model
-model_path = "Model\ppe.pt"
+model_path = "Model/ppe.pt"
 model = YOLO(model_path)
 model.to('cuda')  # Pindahkan model ke GPU
 

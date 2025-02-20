@@ -21,7 +21,8 @@ def run_setup():
     
     print("\n3. Starting detection system...")
     try:
-        subprocess.run([sys.executable, "APD_detection.py"])
+        # subprocess.run([sys.executable, "APD_detection.py"])
+        subprocess.run([sys.executable, "FALL_detection.py"])
     except Exception as e:
         print(f"Detection system error: {str(e)}")
         return False
