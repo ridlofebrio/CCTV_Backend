@@ -12,7 +12,7 @@ from collections import defaultdict
 
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname%s - %(message)s'
+    format='%(asctime)s - %(name%s - %(levelname%s - %(message)s'
 )
 
 # Load environment variables
@@ -48,6 +48,7 @@ last_detection_time = defaultdict(float)
 RECORD_DURATION = 20  # seconds
 RECORD_FPS = 30
 PLAYBACK_FOLDER = "Playback"
+LOCALHOST_URL = "http://localhost:5000/playback"  # Base URL for video access
 
 
 def save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path=None):
@@ -74,7 +75,7 @@ def save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path=None):
 
 
 def save_violation_to_db(cursor, ppa_label, confidence, video_path=None):
-    """Saves APD violation to database"""
+    """Saves APD violation to database with web-accessible video path"""
     try:
         # Get ppa_id based on label
         cursor.execute("""
@@ -82,7 +83,7 @@ def save_violation_to_db(cursor, ppa_label, confidence, video_path=None):
         """, (ppa_label,))
         ppa_id = cursor.fetchone()[0]
 
-        # Insert detection record
+        # Insert detection record with web URL
         cursor.execute("""
             INSERT INTO detection (
                 id_cctv, 
@@ -99,7 +100,7 @@ def save_violation_to_db(cursor, ppa_label, confidence, video_path=None):
             ppa_id,
             False,  # Not a fall detection
             0,      # No overtime
-            video_path,
+            video_path,  # Now contains web URL
             confidence
         ))
 
@@ -111,25 +112,31 @@ def save_violation_to_db(cursor, ppa_label, confidence, video_path=None):
 
 
 def record_violation_video(cap, label, timestamp):
-    """Records video for specified duration when violation is detected"""
+    """Records video for specified duration when violation is detected using H.264 codec"""
     try:
-        # Store current position
-        original_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
-        
         # Create filename with timestamp
         video_filename = f"Pelanggaran_{label}_{timestamp}.mp4"
-        video_path = os.path.join(PLAYBACK_FOLDER, video_filename)
+        temp_path = os.path.join(PLAYBACK_FOLDER, f"temp_{timestamp}.mp4")
+        final_path = os.path.join(PLAYBACK_FOLDER, video_filename)
+        web_path = f"{LOCALHOST_URL}/{video_filename}"  # URL for web access
         
         # Ensure directory exists
         os.makedirs(PLAYBACK_FOLDER, exist_ok=True)
+        
+        # Store current position
+        original_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
         
         # Get original video properties
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        # Initialize video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(video_path, fourcc, RECORD_FPS, 
+        # Initialize video writer with platform-specific codec
+        if os.name == 'nt':  # Windows
+            fourcc = cv2.VideoWriter_fourcc(*'H264')
+        else:  # Linux/Mac
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
+            
+        out = cv2.VideoWriter(temp_path, fourcc, RECORD_FPS, 
                             (frame_width, frame_height))
         
         frames_to_capture = RECORD_DURATION * RECORD_FPS
@@ -160,19 +167,14 @@ def record_violation_video(cap, label, timestamp):
                         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                         
                         if current_label == 'Person':
-                            # Draw person detection in pink
-                            color = (255, 0, 255)
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                            cv2.putText(frame, "Person", 
-                                      (x1, y1 - 10),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                        elif current_label.startswith('Tidak'):
-                            # Draw violation in red
-                            color = (0, 0, 255)
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                            cv2.putText(frame, current_label, 
-                                      (x1, y1 - 10),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                            color = (255, 0, 255)  # Pink
+                        else:
+                            color = (0, 0, 255)    # Red
+                            
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(frame, current_label, 
+                                  (x1, y1 - 10),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
             out.write(frame)
             frames_captured += 1
@@ -184,10 +186,30 @@ def record_violation_video(cap, label, timestamp):
         
         out.release()
         
+        # Convert to H.264 using FFmpeg
+        try:
+            import subprocess
+            ffmpeg_cmd = [
+                'ffmpeg', '-i', temp_path,
+                '-c:v', 'libx264',
+                '-preset', 'medium',
+                '-crf', '23',
+                '-movflags', '+faststart',
+                '-y',  # Overwrite output file if it exists
+                final_path
+            ]
+            subprocess.run(ffmpeg_cmd, check=True)
+            os.remove(temp_path)  # Remove temporary file
+        except Exception as e:
+            logging.error(f"FFmpeg conversion failed: {e}")
+            # If FFmpeg fails, use the original file
+            os.rename(temp_path, final_path)
+        
         # Reset video position
         cap.set(cv2.CAP_PROP_POS_FRAMES, original_pos)
         
-        return video_path
+        # Return web accessible path
+        return web_path
         
     except Exception as e:
         logging.error(f"Error recording violation video: {str(e)}")

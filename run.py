@@ -14,6 +14,17 @@ def run_detection_script(script_name):
 def run_setup():
     print("\n=== Setting up Detection System ===\n")
 
+    # Add Flask server thread
+    flask_thread = threading.Thread(
+        target=run_detection_script,
+        args=("app.py",),
+        name="Flask_Server",
+        daemon=True  
+    )
+    
+    # Start Flask server first
+    flask_thread.start()
+
     print("\n2. Setting up database...")
     try:
         # Run database creation script
@@ -33,23 +44,28 @@ def run_setup():
         apd_thread = threading.Thread(
             target=run_detection_script, 
             args=("APD_detection.py",),
-            name="APD_Detection"
+            name="APD_Detection",
+            daemon=True  # Make thread daemon
         )
         
         fall_thread = threading.Thread(
             target=run_detection_script, 
             args=("FALL_detection.py",),
-            name="Fall_Detection"
+            name="Fall_Detection",
+            daemon=True  # Make thread daemon
         )
         
         # Start both detection systems
         apd_thread.start()
-        # fall_thread.start()
+        fall_thread.start()
         
-        # Wait for both to complete (optional, since they run indefinitely)
-        apd_thread.join()
-        # fall_thread.join()
-        
+        # Keep main thread running
+        try:
+            while True:
+                sleep(1)  # Sleep to prevent high CPU usage
+        except KeyboardInterrupt:
+            print("\nShutting down detection systems...")
+            
     except Exception as e:
         print(f"Detection system error: {str(e)}")
         return False
