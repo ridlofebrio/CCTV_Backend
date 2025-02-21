@@ -44,11 +44,11 @@ def run_setup():
         
         # Start both detection systems
         apd_thread.start()
-        fall_thread.start()
+        # fall_thread.start()
         
         # Wait for both to complete (optional, since they run indefinitely)
         apd_thread.join()
-        fall_thread.join()
+        # fall_thread.join()
         
     except Exception as e:
         print(f"Detection system error: {str(e)}")
