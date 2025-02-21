@@ -156,21 +156,13 @@ def check_apd_violation(label):
     return label in violation_labels
 
 
-def process_video(input_path, frame_width=1536, frame_height=864):
+def process_video(cursor ,input_path, frame_width=1536, frame_height=864):
     """
     Process video with person counting and PPE detection
     """
     try:
         # Database connection setup
         load_dotenv()
-        conn = psycopg2.connect(
-            dbname=os.getenv('DB_NAME'),
-            user=os.getenv('DB_USER'),
-            password=os.getenv('DB_PASSWORD'),
-            host=os.getenv('DB_HOST'),
-            port=os.getenv('DB_PORT')
-        )
-        cursor = conn.cursor()
 
         # Video capture setup
         cap = cv2.VideoCapture(input_path)
@@ -263,7 +255,7 @@ def process_video(input_path, frame_width=1536, frame_height=864):
                 # Only save if there's a violation (has id_ppa)
                 if violation_detected:
                     save_violation_to_db(cursor, label, confidence, timestamp, cap)
-                    conn.commit()
+                    cursor.commit()
 
             # Display the frame
             cv2.imshow('Frame', frame)
@@ -275,7 +267,6 @@ def process_video(input_path, frame_width=1536, frame_height=864):
         cap.release()
         cv2.destroyAllWindows()
         cursor.close()
-        conn.close()
 
     except Exception as e:
         logging.error(f"Error occurred: {str(e)}")
@@ -295,7 +286,7 @@ def convert_label_to_ppa(label):
 
 # Add this new function to record violations
 def record_violation_video(frame, cap, label, timestamp):
-    """Records video for specified duration when violation is detected"""
+    """Records video for specified duration when violation is detected with detection visualization"""
     try:
         # Create filename with timestamp
         video_filename = f"Pelanggaran_{label}_{timestamp}.mp4"
@@ -316,16 +307,68 @@ def record_violation_video(frame, cap, label, timestamp):
         # Calculate frames to capture
         frames_to_capture = RECORD_DURATION * RECORD_FPS
         frames_captured = 0
+        start_time = time.time()
         
         # Start recording
         while frames_captured < frames_to_capture:
             ret, frame = cap.read()
             if not ret:
                 break
+            
+            # Detect objects in each frame
+            with torch.cuda.amp.autocast():
+                results = model.track(frame, persist=True, device=0)
+            
+            # Process detections
+            if results and len(results) > 0:
+                person_boxes = []
                 
-            # Add violation label to frame
-            cv2.putText(frame, f"Pelanggaran : {label}", (10, 30),
+                for box in results[0].boxes:
+                    confidence = box.conf[0].item()
+                    class_id = int(box.cls[0].item())
+                    current_label = LABEL_MAP.get(class_id, 'Unknown')
+                    
+                    if confidence < CONFIDENCE_THRESHOLD:
+                        continue
+                        
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    
+                    # Track persons
+                    if current_label == 'Person':
+                        person_boxes.append(box)
+                        person_id = int(box.id) if box.id is not None else 'N/A'
+                        color = (255, 0, 255)  # Pink for person
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        label_text = f"Person ID: {person_id}, Conf: {confidence:.2f}"
+                        cv2.putText(frame, label_text, (x1, y1 - 10),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    
+                    # Violations
+                    elif current_label.startswith('NO-'):
+                        color = (0, 0, 255)  # Red for violations
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(frame, f"{current_label} ({confidence:.2f})", 
+                                  (x1, y1 - 10),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    
+                    # Other detections
+                    else:
+                        color = (0, 255, 0)  # Green for other
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(frame, f"{current_label} ({confidence:.2f})", 
+                                  (x1, y1 - 10),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+                # Display person count
+                person_count = len(person_boxes)
+                cv2.putText(frame, f'Total Persons: {person_count}', (10, 820),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+            
+            # Add violation label and timestamp
+            cv2.putText(frame, f"Pelanggaran: {label}", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(frame, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             
             out.write(frame)
             frames_captured += 1
@@ -385,6 +428,18 @@ def save_violation_to_db(cursor, label, confidence=None, timestamp=None, cap=Non
 
 
 if __name__ == "__main__":
-    video_path = 'video-test\huuman.mp4'
-    process_video(video_path)
+    try:
+        # Set up database connection
+        connection = get_db()
+        cursor = connection.cursor()
+        
+        # Process video with cursor
+        video_path = 'video-test/huuman.mp4'
+        process_video(cursor, video_path)
+        
+    except Exception as e:
+        logging.error(f"Main execution error: {str(e)}")
+    finally:
+        if 'connection' in locals():
+            connection.close()
 

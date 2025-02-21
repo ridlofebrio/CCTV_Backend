@@ -8,6 +8,7 @@ import psycopg2  # type: ignore
 from datetime import datetime
 from dotenv import load_dotenv
 import torch  # type: ignore
+from collections import defaultdict
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -32,7 +33,10 @@ LABEL_MAP = {
     1: "Normal"
 }
 CONFIDENCE_THRESHOLD = 0.71
-RECORD_DURATION = 5  # seconds
+DETECTION_COOLDOWN = 60  # seconds
+last_detection_time = defaultdict(float)
+
+RECORD_DURATION = 20  # seconds
 RECORD_FPS = 20
 PLAYBACK_FOLDER = "Playback"
 
@@ -166,12 +170,15 @@ def process_fall_detection(input_path, cctv_id=1, frame_width=640, frame_height=
 
                             # Save to database if fall is detected
                             if label == "Jatuh":
-                                is_fall = True
-                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                video_path = record_fall_video(cap, label, timestamp)
-                                save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path)
-                            else:
-                                is_fall = False
+                                current_time = time.time()
+                                if current_time - last_detection_time[cctv_id] >= DETECTION_COOLDOWN:
+                                    is_fall = True
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    video_path = record_fall_video(cap, label, timestamp)
+                                    save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path)
+                                    last_detection_time[cctv_id] = current_time
+                                else:
+                                    is_fall = False
 
             cv2.imshow('Fall Detection', frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):

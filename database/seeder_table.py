@@ -34,6 +34,9 @@ try:
         ('Hikvision', 'Gedung PIP', 1, -7.205353, 112.741598, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
         ('Dahua', 'Dock Irian', 2, -7.204889472323035, 112.73974910298983, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
         ('Axis', 'Divisi Kapal Perang', 1, -7.205132962241805, 112.73865248258255, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
+        ('Hikvision', 'Gedung PIP', 1, -7.205274124365183, 112.74220431467062, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
+        ('Dahua', 'Dock Irian', 2,-7.20345397756675, 112.73951137680253, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
+        ('Axis', 'Divisi Kapal Perang', 1, -7.204358729783707, 112.73798788207719, 'https://cdn-icons-png.freepik.com/512/5817/5817084.png'),
     ]
     
     insert_cctv = """
