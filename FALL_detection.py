@@ -65,7 +65,7 @@ def save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path=None):
 
 
 def record_fall_video(cap, label, timestamp):
-    """Records video for specified duration when fall is detected"""
+    """Records video for specified duration when fall is detected using H.264 codec"""
     try:
         # Create filename with timestamp
         video_filename = f"Fall_{label}_{timestamp}.mp4"
@@ -78,12 +78,18 @@ def record_fall_video(cap, label, timestamp):
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        # Initialize video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(video_path, fourcc, RECORD_FPS,
+        # Initialize video writer with H.264 codec
+        if os.name == 'nt':  # Windows
+            fourcc = cv2.VideoWriter_fourcc(*'H264')
+        else:  # Linux/Mac
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
+            
+        # Create temporary path for raw video
+        temp_path = os.path.join(PLAYBACK_FOLDER, f"temp_{timestamp}.mp4")
+        
+        out = cv2.VideoWriter(temp_path, fourcc, RECORD_FPS,
                             (frame_width, frame_height))
 
-        # Calculate frames to capture
         frames_to_capture = RECORD_DURATION * RECORD_FPS
         frames_captured = 0
         start_time = time.time()
@@ -94,7 +100,7 @@ def record_fall_video(cap, label, timestamp):
             if not ret:
                 break
 
-            # Detect falls in each frame of recording
+            # Detect falls in each frame
             results = model(frame, stream=False)
 
             for result in results:
@@ -107,12 +113,13 @@ def record_fall_video(cap, label, timestamp):
                         if confidence > CONFIDENCE_THRESHOLD:
                             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                            cv2.putText(frame, f"{label} ({confidence:.2f})", (x1, y1 - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                            cv2.putText(frame, f"{label} ({confidence:.2f})", 
+                                      (x1, y1 - 10),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
             # Add label to frame
             cv2.putText(frame, f"Fall Detected: {label}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
             out.write(frame)
             frames_captured += 1
@@ -123,6 +130,26 @@ def record_fall_video(cap, label, timestamp):
                 break
 
         out.release()
+
+        # Convert to H.264 using FFmpeg if available
+        try:
+            import subprocess
+            ffmpeg_cmd = [
+                'ffmpeg', '-i', temp_path,
+                '-c:v', 'libx264',
+                '-preset', 'medium',
+                '-crf', '23',
+                '-movflags', '+faststart',
+                '-y',  # Overwrite output file if it exists
+                video_path
+            ]
+            subprocess.run(ffmpeg_cmd, check=True)
+            os.remove(temp_path)  # Remove temporary file
+        except Exception as e:
+            logging.error(f"FFmpeg conversion failed: {e}")
+            # If FFmpeg fails, use the original file
+            os.rename(temp_path, video_path)
+
         return video_path
 
     except Exception as e:
