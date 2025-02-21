@@ -39,23 +39,33 @@ last_detection_time = defaultdict(float)
 RECORD_DURATION = 20  # seconds
 RECORD_FPS = 20
 PLAYBACK_FOLDER = "Playback"
+LOCALHOST_URL = "http://localhost:5000/playback"  # Base URL for video access
 
 
 def save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path=None):
-    """Saves fall detection data to the database"""
+    """Saves fall detection data to the database with web-accessible video path"""
     try:
         connection = get_db()
         cursor = connection.cursor()
 
+        # video_path now contains the web URL
         cursor.execute("""
-            INSERT INTO detection (id_cctv, id_ppa, deteksi_jatuh, deteksi_overtime, link_playback, timestamp, confidan)
+            INSERT INTO detection (
+                id_cctv, 
+                id_ppa, 
+                deteksi_jatuh, 
+                deteksi_overtime, 
+                link_playback, 
+                timestamp, 
+                confidan
+            )
             VALUES (%s, NULL, %s, 0, %s, CURRENT_TIMESTAMP, %s)
         """, (cctv_id, is_fall, video_path, confidence))
 
         connection.commit()
         cursor.close()
         logging.info(
-            f"Fall detection saved to database: Fall={is_fall}, Confidence={confidence}, Video={video_path}")
+            f"Fall detection saved: Fall={is_fall}, Confidence={confidence}%, URL={video_path}")
 
     except psycopg2.Error as e:
         logging.error(f"Database error: {e}")
@@ -67,9 +77,11 @@ def save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path=None):
 def record_fall_video(cap, label, timestamp):
     """Records video for specified duration when fall is detected using H.264 codec"""
     try:
-        # Create filename with timestamp
+        # Create filenames and paths
         video_filename = f"Fall_{label}_{timestamp}.mp4"
-        video_path = os.path.join(PLAYBACK_FOLDER, video_filename)
+        temp_path = os.path.join(PLAYBACK_FOLDER, f"temp_{timestamp}.mp4")
+        final_path = os.path.join(PLAYBACK_FOLDER, video_filename)
+        web_path = f"{LOCALHOST_URL}/{video_filename}"  # URL for web access
 
         # Ensure directory exists
         os.makedirs(PLAYBACK_FOLDER, exist_ok=True)
@@ -83,9 +95,6 @@ def record_fall_video(cap, label, timestamp):
             fourcc = cv2.VideoWriter_fourcc(*'H264')
         else:  # Linux/Mac
             fourcc = cv2.VideoWriter_fourcc(*'avc1')
-            
-        # Create temporary path for raw video
-        temp_path = os.path.join(PLAYBACK_FOLDER, f"temp_{timestamp}.mp4")
         
         out = cv2.VideoWriter(temp_path, fourcc, RECORD_FPS,
                             (frame_width, frame_height))
@@ -141,16 +150,17 @@ def record_fall_video(cap, label, timestamp):
                 '-crf', '23',
                 '-movflags', '+faststart',
                 '-y',  # Overwrite output file if it exists
-                video_path
+                final_path
             ]
             subprocess.run(ffmpeg_cmd, check=True)
             os.remove(temp_path)  # Remove temporary file
         except Exception as e:
             logging.error(f"FFmpeg conversion failed: {e}")
             # If FFmpeg fails, use the original file
-            os.rename(temp_path, video_path)
+            os.rename(temp_path, final_path)
 
-        return video_path
+        # Return web-accessible path instead of file system path
+        return web_path
 
     except Exception as e:
         logging.error(f"Error recording fall video: {str(e)}")
