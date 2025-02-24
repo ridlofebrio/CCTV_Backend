@@ -39,7 +39,7 @@ last_detection_time = defaultdict(float)
 RECORD_DURATION = 20  # seconds
 RECORD_FPS = 20
 PLAYBACK_FOLDER = "Playback"
-LOCALHOST_URL = "http://localhost:5000/playback"  # Base URL for video access
+LOCALHOST_URL = "playback"  # Base URL for video access
 
 
 def save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path=None):

@@ -48,7 +48,7 @@ last_detection_time = defaultdict(float)
 RECORD_DURATION = 20  # seconds
 RECORD_FPS = 30
 PLAYBACK_FOLDER = "Playback"
-LOCALHOST_URL = "http://localhost:5000/playback"  # Base URL for video access
+LOCALHOST_URL = "playback"  # Base URL for video access
 
 
 def save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path=None):
@@ -77,11 +77,22 @@ def save_fall_detection_to_db(cctv_id, is_fall, confidence, video_path=None):
 def save_violation_to_db(cursor, ppa_label, confidence, video_path=None):
     """Saves APD violation to database with web-accessible video path"""
     try:
+        # Skip database insert if video_path is None
+        if video_path is None:
+            logging.warning(f"Skipping database insert - No video path for violation: {ppa_label}")
+            return
+
         # Get ppa_id based on label
         cursor.execute("""
             SELECT id FROM ppa WHERE label = %s
         """, (ppa_label,))
-        ppa_id = cursor.fetchone()[0]
+        result = cursor.fetchone()
+        
+        if not result:
+            logging.error(f"PPA label not found in database: {ppa_label}")
+            return
+            
+        ppa_id = result[0]
 
         # Insert detection record with web URL
         cursor.execute("""
@@ -100,7 +111,7 @@ def save_violation_to_db(cursor, ppa_label, confidence, video_path=None):
             ppa_id,
             False,  # Not a fall detection
             0,      # No overtime
-            video_path,  # Now contains web URL
+            video_path,
             confidence
         ))
 
@@ -109,6 +120,8 @@ def save_violation_to_db(cursor, ppa_label, confidence, video_path=None):
 
     except psycopg2.Error as e:
         logging.error(f"Database error: {e}")
+    except Exception as e:
+        logging.error(f"Error saving violation: {str(e)}")
 
 
 def record_violation_video(cap, label, timestamp):
@@ -281,9 +294,14 @@ def process_video(cursor, input_path, frame_width=1536, frame_height=864):
                             if current_time - last_detection_time[label] >= DETECTION_COOLDOWN:
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                 video_path = record_violation_video(cap, label, timestamp)
-                                save_violation_to_db(cursor, label, confidence * 100, video_path)
-                                connection.commit()
-                                last_detection_time[label] = current_time
+                                
+                                # Only save to database if we have a valid video path
+                                if video_path:
+                                    save_violation_to_db(cursor, label, confidence * 100, video_path)
+                                    connection.commit()
+                                    last_detection_time[label] = current_time
+                                else:
+                                    logging.warning(f"Video recording failed for violation: {label}")
 
             # Display frame
             cv2.imshow('APD Detection', frame)
