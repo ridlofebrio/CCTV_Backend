@@ -18,7 +18,7 @@ load_dotenv()
 
 # Periksa ketersediaan CUDA
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
+logging.info(f"Using device: {device}")
 
 # Konfigurasi model YOLO
 MODEL_PATH = "Model/People.pt"
@@ -43,7 +43,6 @@ DB_CONFIG = {
 DETECTION_THRESHOLD = 0.5  # Ambang kepercayaan deteksi
 OVERTIME_THRESHOLD = 10  # Waktu maksimum (dalam detik) sebelum dianggap pelanggaran
 RECORD_DURATION = 20  # Durasi rekaman (dalam detik)
-RECORD_FPS = 30
 PLAYBACK_FOLDER = "E:\\Magang\\Project\\Backend_CCTV\\Backend_CCTV\\Playback"
 
 
@@ -51,13 +50,18 @@ def save_violation_to_db(cursor, id_cctv, overtime_duration, video_path):
     """
     Menyimpan data pelanggaran ke database.
     """
-    cursor.execute(
-        """
-    INSERT INTO detection (id_cctv, id_ppa, deteksi_jatuh, deteksi_overtime, link_playback)
-    VALUES (%s, NULL, FALSE, %s, %s)
-    """,
-        (id_cctv, overtime_duration, video_path),
-    )
+    try:
+        cursor.execute(
+            """
+        INSERT INTO detection (id_cctv, id_ppa, deteksi_jatuh, deteksi_overtime, link_playback)
+        VALUES (%s, NULL, FALSE, %s, %s)
+        """,
+            (id_cctv, overtime_duration, video_path),
+        )
+        logging.info(f"Data pelanggaran berhasil disimpan ke database: {video_path}")
+    except Exception as e:
+        logging.error(f"Gagal menyimpan data pelanggaran ke database: {str(e)}")
+        raise
 
 
 def record_detection_video(cap, timestamp, initial_detection_duration=0):
@@ -75,15 +79,16 @@ def record_detection_video(cap, timestamp, initial_detection_duration=0):
         # Ambil properti video
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        input_fps = int(cap.get(cv2.CAP_PROP_FPS))  # Ambil FPS dari video input
 
         # Inisialisasi video writer
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = cv2.VideoWriter(
-            video_path, fourcc, RECORD_FPS, (frame_width, frame_height)
+            video_path, fourcc, input_fps, (frame_width, frame_height)
         )
 
         # Hitung jumlah frame yang perlu direkam
-        frames_to_capture = RECORD_DURATION * RECORD_FPS
+        frames_to_capture = RECORD_DURATION * input_fps
         frames_captured = 0
 
         # Mulai merekam
@@ -117,7 +122,7 @@ def record_detection_video(cap, timestamp, initial_detection_duration=0):
 
                 # Hitung durasi deteksi
                 detection_duration = initial_detection_duration + (
-                    frames_captured / RECORD_FPS
+                    frames_captured / input_fps
                 )
 
                 # Tentukan warna berdasarkan durasi deteksi
@@ -172,19 +177,26 @@ def process_video(input_path, id_cctv=1):
         if not cap.isOpened():
             raise ValueError(f"Cannot open input video: {input_path}")
 
+        # Ambil frame rate video
+        input_fps = int(cap.get(cv2.CAP_PROP_FPS))
+
         # Inisialisasi variabel
         start_time = datetime.now()
-        detection_start_time = None
+        detection_start_times = (
+            {}
+        )  # Dictionary untuk menyimpan waktu mulai deteksi setiap ID
         overtime_duration = 0
         violation_bbox = None
-        detection_duration = 0  # Initialize detection_duration
         recording = False  # Flag untuk menandai apakah sedang merekam
         video_path = None  # Path video hasil rekaman
+        frame_count = 0  # Hitung jumlah frame yang telah diproses
 
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
+
+            frame_count += 1
 
             # Deteksi orang menggunakan YOLO
             results = model(frame, conf=DETECTION_THRESHOLD)
@@ -209,40 +221,45 @@ def process_video(input_path, id_cctv=1):
                 x1, y1, x2, y2 = map(int, ltrb)
                 bbox = (x1, y1, x2 - x1, y2 - y1)
 
-                if detection_start_time is None:
-                    detection_start_time = datetime.now()
-                else:
-                    # Hitung durasi deteksi (diperlambat 30 kali)
-                    detection_duration = (
-                        datetime.now() - detection_start_time
-                    ).total_seconds() / 25
-                    if detection_duration > OVERTIME_THRESHOLD:
-                        overtime_duration = int(detection_duration)
-                        violation_bbox = bbox
-                        # Mulai merekam jika belum merekam
-                        if not recording:
-                            video_path = record_detection_video(
-                                cap,
-                                datetime.now().strftime("%Y%m%d_%H%M%S"),
-                                detection_duration,
-                            )
-                            recording = True
-                        # Simpan ke database
-                        save_violation_to_db(
-                            cursor, id_cctv, overtime_duration, video_path
-                        )
-                        conn.commit()
-                        logging.info(
-                            f"Pelanggaran terdeteksi: Melebihi waktu {overtime_duration} detik"
-                        )
-                        detection_start_time = None  # Reset timer
+                # Jika ID belum ada dalam dictionary, tambahkan waktu mulai deteksi
+                if track_id not in detection_start_times:
+                    detection_start_times[track_id] = frame_count
 
-                # Gambar kotak, ID, dan timer
+                # Hitung durasi deteksi berdasarkan frame rate
+                detection_duration = (
+                    frame_count - detection_start_times[track_id]
+                ) / input_fps
+
+                # Jika durasi deteksi melebihi OVERTIME_THRESHOLD, ubah warna bounding box menjadi merah
+                if detection_duration > OVERTIME_THRESHOLD:
+                    overtime_duration = int(detection_duration)
+                    violation_bbox = bbox
+                    # Mulai merekam jika belum merekam
+                    if not recording:
+                        video_path = record_detection_video(
+                            cap,
+                            datetime.now().strftime("%Y%m%d_%H%M%S"),
+                            detection_duration,
+                        )
+                        recording = True
+                    # Simpan ke database
+                    save_violation_to_db(cursor, id_cctv, overtime_duration, video_path)
+                    conn.commit()
+                    logging.info(
+                        f"Pelanggaran terdeteksi: Melebihi waktu {overtime_duration} detik"
+                    )
+                    detection_start_times[track_id] = (
+                        frame_count  # Reset timer untuk ID ini
+                    )
+
+                # Tentukan warna bounding box berdasarkan durasi deteksi
                 color = (
                     (0, 255, 0)
                     if detection_duration <= OVERTIME_THRESHOLD
                     else (0, 0, 255)
                 )
+
+                # Gambar kotak, ID, dan timer
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
                     frame,
