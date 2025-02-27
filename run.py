@@ -54,10 +54,18 @@ def run_setup():
             name="Fall_Detection",
             daemon=True  # Make thread daemon
         )
+
+        people_thread = threading.Thread(
+            target=run_detection_script, 
+            args=("PEOPLE_detection.py",),
+            name="PEOPLE_Detection",
+            daemon=True  # Make thread daemon
+        )
         
         # Start both detection systems
         apd_thread.start()
-        fall_thread.start()
+        # fall_thread.start()
+        # people_thread.start()
         
         # Keep main thread running
         try:

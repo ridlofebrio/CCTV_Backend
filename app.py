@@ -1,4 +1,4 @@
-from flask import Flask, send_file, render_template_string
+from flask import Flask, send_file, render_template_string # type: ignore
 import os
 import mimetypes
 
