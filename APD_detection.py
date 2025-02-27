@@ -9,13 +9,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 import torch  # type: ignore
 from collections import defaultdict
+import threading
+from copy import deepcopy
 
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name%s - %(levelname%s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
-# Load environment variables
 load_dotenv()
 
 # Check CUDA availability
@@ -28,20 +28,20 @@ model_path = "Model/ppe.pt"
 model = YOLO(model_path)
 model.to('cuda')
 
-# Update LABEL_MAP to match PPE violations
+# Update LABEL_MAP to remove 'Tidak Memakai Rompi'
 LABEL_MAP = {
     0: 'Memakai Helm',      # Hardhat
     1: 'Memakai Masker',    # Mask
     2: 'Tidak Memakai Helm', # NO-Hardhat
     3: 'Tidak Memakai Masker', # NO-Mask
-    4: 'Tidak Memakai Rompi',  # NO-Safety Vest
-    5: 'Person',
+    4: None,  # Ignore NO-Safety Vest
+    5: None,
     6: 'Safety Cone',
     7: 'Memakai Rompi',     # Safety Vest
     8: 'machinery',
     9: 'vehicle'
 }
-CONFIDENCE_THRESHOLD = 0.5
+CONFIDENCE_THRESHOLD = 0.01
 DETECTION_COOLDOWN = 70  # seconds
 last_detection_time = defaultdict(float)
 
@@ -145,7 +145,10 @@ def record_violation_video(cap, label, timestamp):
         
         # Initialize video writer with platform-specific codec
         if os.name == 'nt':  # Windows
-            fourcc = cv2.VideoWriter_fourcc(*'H264')
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*'avc1')  # Try avc1 instead
+            except:
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')  # Fallback to XVID
         else:  # Linux/Mac
             fourcc = cv2.VideoWriter_fourcc(*'avc1')
             
@@ -154,6 +157,9 @@ def record_violation_video(cap, label, timestamp):
         
         frames_to_capture = RECORD_DURATION * RECORD_FPS
         frames_captured = 0
+        
+        # Create window for recording
+        cv2.namedWindow('Recording Violation', cv2.WINDOW_NORMAL)
         
         while frames_captured < frames_to_capture:
             ret, frame = cap.read()
@@ -172,7 +178,7 @@ def record_violation_video(cap, label, timestamp):
                     class_id = int(box.cls[0].item())
                     current_label = LABEL_MAP.get(class_id, 'Unknown')
                     
-                    if confidence < CONFIDENCE_THRESHOLD:
+                    if confidence < CONFIDENCE_THRESHOLD or current_label is None:
                         continue
                     
                     # Only show Person and violations
@@ -189,6 +195,14 @@ def record_violation_video(cap, label, timestamp):
                                   (x1, y1 - 10),
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
+            # Add recording status to frame
+            cv2.putText(frame, f"Recording violation: {label}", 
+                      (10, 30), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(frame, f"Frame: {frames_captured}/{frames_to_capture}", 
+                      (10, 60), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
             out.write(frame)
             frames_captured += 1
             
@@ -199,7 +213,7 @@ def record_violation_video(cap, label, timestamp):
         
         out.release()
         
-        # Convert to H.264 using FFmpeg
+        # Use MP4V codec for wider compatibility
         try:
             import subprocess
             ffmpeg_cmd = [
@@ -220,6 +234,9 @@ def record_violation_video(cap, label, timestamp):
         
         # Reset video position
         cap.set(cv2.CAP_PROP_POS_FRAMES, original_pos)
+        
+        # Close recording window
+        cv2.destroyWindow('Recording Violation')
         
         # Return web accessible path
         return web_path
@@ -267,28 +284,19 @@ def process_video(cursor, input_path, frame_width=1536, frame_height=864):
                     class_id = int(box.cls[0].item())
                     label = LABEL_MAP.get(class_id, 'Unknown')
 
-                    if confidence < CONFIDENCE_THRESHOLD:
+                    # Skip if label is None (Tidak Memakai Rompi) or confidence too low
+                    if label is None or confidence < CONFIDENCE_THRESHOLD:
                         continue
 
-                    # Only show Person and Violation detections
-                    if label == 'Person' or label.startswith('Tidak'):
+                    # Only process Person and specific violations (not rompi)
+                    if label is not None and (label == 'Person' or (label.startswith('Tidak') and label != 'Tidak Memakai Rompi')):
                         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                         
                         if label == 'Person':
                             person_count += 1
-                            # Draw person detection in pink
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                            cv2.putText(frame, "Person", 
-                                      (x1, y1 - 10),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-                        else:
+                            # No need to draw since we're not displaying
+                        elif label != 'Tidak Memakai Rompi':  # Extra check
                             violation_detected = True
-                            # Draw violation in red
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                            cv2.putText(frame, label, 
-                                      (x1, y1 - 10),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                            
                             # Handle violation recording and database
                             current_time = time.time()
                             if current_time - last_detection_time[label] >= DETECTION_COOLDOWN:
@@ -300,16 +308,20 @@ def process_video(cursor, input_path, frame_width=1536, frame_height=864):
                                     save_violation_to_db(cursor, label, confidence * 100, video_path)
                                     connection.commit()
                                     last_detection_time[label] = current_time
+                                    logging.info(f"Violation detected and recorded: {label}")
                                 else:
                                     logging.warning(f"Video recording failed for violation: {label}")
 
-            # Display frame
-            cv2.imshow('APD Detection', frame)
+            # Only show status info in terminal, don't display the main detection window
+            if violation_detected:
+                logging.info(f"Violation detected: {label}, Processing...")
+            
+            # Check for quit key without showing window
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
         cap.release()
-        cv2.destroyAllWindows()
+        # No need to destroy windows since we don't show the main detection
 
     except Exception as e:
         logging.error(f"Error occurred: {str(e)}")
@@ -320,7 +332,7 @@ if __name__ == "__main__":
     try:
         connection = get_db()
         cursor = connection.cursor()
-        video_path = "video-test/huuman.mp4"
+        video_path = "video-test/pal.mp4"
         process_video(cursor, video_path)
     except Exception as e:
         logging.error(f"Main execution error: {str(e)}")

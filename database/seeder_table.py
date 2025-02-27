@@ -75,7 +75,7 @@ try:
                     random.randint(0, 60),  # deteksi_overtime
                     f'Playback/violation_{start_time.strftime("%Y%m%d_%H%M%S")}.mp4',  # link_playback
                     start_time,  # timestamp
-                    random.uniform(0.5, 0.95)  # confidence
+                    random.uniform(50, 95)  # confidence
                 )
                 detection_data.append(detection)
         
