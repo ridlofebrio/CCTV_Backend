@@ -18,15 +18,20 @@ logging.basicConfig(
 )
 load_dotenv()
 
-# Check CUDA availability
-print(f"Using CUDA: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
+# Check CUDA availability and set device
+cuda_available = torch.cuda.is_available()
+device = 'cuda' if cuda_available else 'cpu'
+print(f"Using device: {device}")
+
+if cuda_available:
     print(f"GPU Device: {torch.cuda.get_device_name(0)}")
+else:
+    print("CUDA not available. Using CPU. Detection will be slower.")
 
 # Load YOLO model
-model_path = "Model/ppe.pt"
+model_path = "Model/best (3).pt"
 model = YOLO(model_path)
-model.to('cuda')
+model.to(device)  # Use selected device
 
 # Update LABEL_MAP to remove 'Tidak Memakai Rompi'
 LABEL_MAP = {
@@ -41,7 +46,7 @@ LABEL_MAP = {
     8: 'machinery',
     9: 'vehicle'
 }
-CONFIDENCE_THRESHOLD = 0.01
+CONFIDENCE_THRESHOLD = 0.1
 DETECTION_COOLDOWN = 70  # seconds
 last_detection_time = defaultdict(float)
 
@@ -143,18 +148,32 @@ def record_violation_video(cap, label, timestamp):
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        # Initialize video writer with platform-specific codec
-        if os.name == 'nt':  # Windows
-            try:
-                fourcc = cv2.VideoWriter_fourcc(*'avc1')  # Try avc1 instead
-            except:
-                fourcc = cv2.VideoWriter_fourcc(*'XVID')  # Fallback to XVID
-        else:  # Linux/Mac
-            fourcc = cv2.VideoWriter_fourcc(*'avc1')
-            
-        out = cv2.VideoWriter(temp_path, fourcc, RECORD_FPS, 
-                            (frame_width, frame_height))
+        # Try multiple codecs until one works
+        codecs_to_try = [
+            ('mp4v', cv2.VideoWriter_fourcc(*'mp4v')),  # More compatible
+            ('XVID', cv2.VideoWriter_fourcc(*'XVID')),  # Widely supported
+            ('avc1', cv2.VideoWriter_fourcc(*'avc1')),  # Try avc1 if available
+            ('MJPG', cv2.VideoWriter_fourcc(*'MJPG'))   # Last resort
+        ]
         
+        out = None
+        for codec_name, fourcc in codecs_to_try:
+            try:
+                test_out = cv2.VideoWriter(temp_path, fourcc, RECORD_FPS, 
+                                        (frame_width, frame_height))
+                if test_out.isOpened():
+                    out = test_out
+                    logging.info(f"Using codec: {codec_name}")
+                    break
+                else:
+                    test_out.release()
+            except Exception as codec_error:
+                logging.warning(f"Codec {codec_name} failed: {codec_error}")
+        
+        if out is None or not out.isOpened():
+            logging.error("Could not initialize any video codec")
+            return None
+            
         frames_to_capture = RECORD_DURATION * RECORD_FPS
         frames_captured = 0
         
@@ -166,8 +185,12 @@ def record_violation_video(cap, label, timestamp):
             if not ret:
                 break
                 
-            # Process frame with detections
-            with torch.amp.autocast('cuda'):
+            # Process frame with detections - handle both CPU and GPU
+            if cuda_available:
+                with torch.amp.autocast('cuda'):
+                    results = model(frame, stream=False)
+            else:
+                # For CPU, don't use autocast
                 results = model(frame, stream=False)
             
             # Add detections to frame
@@ -182,14 +205,10 @@ def record_violation_video(cap, label, timestamp):
                         continue
                     
                     # Only show Person and violations
-                    if current_label == 'Person' or current_label.startswith('Tidak'):
+                    if current_label is not None and (current_label == 'Person' or current_label.startswith('Tidak')):
                         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                         
-                        if current_label == 'Person':
-                            color = (255, 0, 255)  # Pink
-                        else:
-                            color = (0, 0, 255)    # Red
-                            
+                        color = (255, 0, 255) if current_label == 'Person' else (0, 0, 255)
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                         cv2.putText(frame, current_label, 
                                   (x1, y1 - 10),
@@ -213,7 +232,7 @@ def record_violation_video(cap, label, timestamp):
         
         out.release()
         
-        # Use MP4V codec for wider compatibility
+        # Try FFmpeg conversion
         try:
             import subprocess
             ffmpeg_cmd = [
@@ -222,15 +241,17 @@ def record_violation_video(cap, label, timestamp):
                 '-preset', 'medium',
                 '-crf', '23',
                 '-movflags', '+faststart',
-                '-y',  # Overwrite output file if it exists
-                final_path
+                '-y', final_path
             ]
             subprocess.run(ffmpeg_cmd, check=True)
             os.remove(temp_path)  # Remove temporary file
         except Exception as e:
             logging.error(f"FFmpeg conversion failed: {e}")
             # If FFmpeg fails, use the original file
-            os.rename(temp_path, final_path)
+            try:
+                os.rename(temp_path, final_path)
+            except Exception as rename_error:
+                logging.error(f"Failed to rename temp file: {rename_error}")
         
         # Reset video position
         cap.set(cv2.CAP_PROP_POS_FRAMES, original_pos)
@@ -261,6 +282,12 @@ def process_video(cursor, input_path, frame_width=1536, frame_height=864):
 
         if not cap.isOpened():
             raise ValueError(f"Cannot open input source: {input_path}")
+            
+        # For CPU usage, consider using a smaller frame size to improve performance
+        if not cuda_available:
+            frame_width = min(frame_width, 960)  # Lower resolution for CPU
+            frame_height = min(frame_height, 540)
+            logging.info(f"Using reduced resolution ({frame_width}x{frame_height}) for CPU processing")
 
         while True:
             ret, frame = cap.read()
@@ -269,8 +296,12 @@ def process_video(cursor, input_path, frame_width=1536, frame_height=864):
 
             frame = cv2.resize(frame, (frame_width, frame_height))
 
-            # Run detection with CUDA acceleration
-            with torch.amp.autocast('cuda'):
+            # Run detection with appropriate acceleration
+            if cuda_available:
+                with torch.amp.autocast('cuda'):
+                    results = model(frame, stream=False)
+            else:
+                # For CPU, don't use autocast
                 results = model(frame, stream=False)
 
             person_count = 0
@@ -321,7 +352,6 @@ def process_video(cursor, input_path, frame_width=1536, frame_height=864):
                 break
 
         cap.release()
-        # No need to destroy windows since we don't show the main detection
 
     except Exception as e:
         logging.error(f"Error occurred: {str(e)}")
@@ -332,7 +362,7 @@ if __name__ == "__main__":
     try:
         connection = get_db()
         cursor = connection.cursor()
-        video_path = "video-test/pal.mp4"
+        video_path = ""
         process_video(cursor, video_path)
     except Exception as e:
         logging.error(f"Main execution error: {str(e)}")
