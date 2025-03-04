@@ -18,14 +18,15 @@ logging.basicConfig(
 load_dotenv()
 
 # Check CUDA availability
-print(f"Using CUDA: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
+cuda_available = torch.cuda.is_available()
+print(f"Using CUDA: {cuda_available}")
+if cuda_available:
     print(f"GPU Device: {torch.cuda.get_device_name(0)}")
 
 # Konfigurasi model YOLO
 MODEL_PATH = "Model/People.pt"
 model = YOLO(MODEL_PATH)
-model.to("cuda")  # Use CUDA directly
+model.to("cuda" if cuda_available else "cpu")  # Use CUDA if available
 
 # Inisialisasi DeepSORT tracker
 tracker = DeepSort(max_age=30)
@@ -79,8 +80,12 @@ def record_detection_video(cap, timestamp, initial_detection_duration=0):
             if not ret:
                 break
 
-            with torch.amp.autocast("cuda"):
-                results = model(frame, conf=DETECTION_THRESHOLD, device=0)
+            with torch.amp.autocast("cuda" if cuda_available else "cpu"):
+                results = model(
+                    frame,
+                    conf=DETECTION_THRESHOLD,
+                    device=0 if cuda_available else "cpu",
+                )
 
             detections = []
             for box in results[0].boxes:
@@ -143,9 +148,25 @@ def process_video(input_path, id_cctv=1):
         conn = psycopg2.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        cap = cv2.VideoCapture(input_path)
+        # Video/RTSP capture setup
+        if input_path.startswith("rtsp://"):
+            cap = cv2.VideoCapture(input_path, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        else:
+            cap = cv2.VideoCapture(input_path)
+
         if not cap.isOpened():
-            raise ValueError(f"Cannot open input video: {input_path}")
+            raise ValueError(f"Cannot open input source: {input_path}")
+
+        # For CPU usage, consider using a smaller frame size to improve performance
+        if not cuda_available:
+            frame_width = min(
+                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), 960
+            )  # Lower resolution for CPU
+            frame_height = min(int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), 540)
+            logging.info(
+                f"Using reduced resolution ({frame_width}x{frame_height}) for CPU processing"
+            )
 
         input_fps = int(cap.get(cv2.CAP_PROP_FPS))
         start_time = datetime.now()
@@ -161,8 +182,12 @@ def process_video(input_path, id_cctv=1):
                 break
 
             frame_count += 1
-            with torch.amp.autocast("cuda"):
-                results = model(frame, conf=DETECTION_THRESHOLD, device=0)
+            with torch.amp.autocast("cuda" if cuda_available else "cpu"):
+                results = model(
+                    frame,
+                    conf=DETECTION_THRESHOLD,
+                    device=0 if cuda_available else "cpu",
+                )
 
             detections = []
             for box in results[0].boxes:
@@ -234,5 +259,5 @@ def process_video(input_path, id_cctv=1):
 
 
 if __name__ == "__main__":
-    video_path = "video-test/test.mp4"
+    video_path = "rtsp://your_rtsp_url"  # Ganti dengan URL RTSP Anda
     process_video(video_path)
