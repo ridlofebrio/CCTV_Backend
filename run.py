@@ -63,9 +63,9 @@ def run_setup():
         )
         
         # Start both detection systems
-        apd_thread.start()
+        # apd_thread.start()
         # fall_thread.start()
-        # people_thread.start()
+        people_thread.start()
         
         # Keep main thread running
         try:
