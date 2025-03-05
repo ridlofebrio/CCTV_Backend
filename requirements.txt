@@ -7,3 +7,4 @@ flask
 cloudinary
 torch
 torchvision
+deep-sort-realtime

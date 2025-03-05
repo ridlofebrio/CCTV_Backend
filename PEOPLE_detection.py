@@ -1,39 +1,35 @@
 import os
-import cv2  # type: ignore
-from ultralytics import YOLO  # type: ignore
-import psycopg2  # type: ignore
+import cv2
+import logging
+import psycopg2
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import logging
-from deep_sort_realtime.deepsort_tracker import DeepSort  # type: ignore
-import torch  # type: ignore
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+import winsound
+import torch
 
 # Konfigurasi logging
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 # Load environment variables
 load_dotenv()
 
 # Check CUDA availability
-print(f"Using CUDA: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
+cuda_available = torch.cuda.is_available()
+print(f"Using CUDA: {cuda_available}")
+if cuda_available:
     print(f"GPU Device: {torch.cuda.get_device_name(0)}")
 
-# Load YOLO model with CUDA
+# Konfigurasi model YOLO
 MODEL_PATH = "Model/People.pt"
 model = YOLO(MODEL_PATH)
-model.to('cuda')  # Use CUDA directly
+model.to("cuda" if cuda_available else "cpu")  # Use CUDA if available
 
-# Initialize DeepSORT tracker
-tracker = DeepSort(
-    max_age=30,
-    n_init=3,
-    nn_budget=100,
-    embedder="mobilenet",
-)
+# Inisialisasi DeepSORT tracker
+tracker = DeepSort(max_age=30)
 
 # Konfigurasi database
 DB_CONFIG = {
@@ -45,79 +41,60 @@ DB_CONFIG = {
 }
 
 # Konfigurasi deteksi
-DETECTION_THRESHOLD = 0.5  # Ambang kepercayaan deteksi
-OVERTIME_THRESHOLD = 10  # Waktu maksimum (dalam detik) sebelum dianggap pelanggaran
-RECORD_DURATION = 20  # Durasi rekaman (dalam detik)
-PLAYBACK_FOLDER = "E:\\Magang\\Project\\Backend_CCTV\\Backend_CCTV\\Playback"
+DETECTION_THRESHOLD = 0.7
+OVERTIME_THRESHOLD = 10
+RECORD_DURATION = 20
+PLAYBACK_FOLDER = "Playback"
 
 
 def save_violation_to_db(cursor, id_cctv, overtime_duration, video_path):
-    """
-    Menyimpan data pelanggaran ke database.
-    """
-    try:
-        cursor.execute(
-            """
+    cursor.execute(
+        """
         INSERT INTO detection (id_cctv, id_ppa, deteksi_jatuh, deteksi_overtime, link_playback)
         VALUES (%s, NULL, FALSE, %s, %s)
         """,
-            (id_cctv, overtime_duration, video_path),
-        )
-        logging.info(f"Data pelanggaran berhasil disimpan ke database: {video_path}")
-    except Exception as e:
-        logging.error(f"Gagal menyimpan data pelanggaran ke database: {str(e)}")
-        raise
+        (id_cctv, overtime_duration, video_path),
+    )
 
 
 def record_detection_video(cap, timestamp, initial_detection_duration=0):
-    """
-    Merekam hasil proses video (deteksi orang) dan menyimpannya ke file.
-    """
     try:
-        # Buat nama file video
         video_filename = f"Detection_{timestamp}.mp4"
         video_path = os.path.join(PLAYBACK_FOLDER, video_filename)
-
-        # Pastikan folder playback ada
         os.makedirs(PLAYBACK_FOLDER, exist_ok=True)
 
-        # Ambil properti video
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        input_fps = int(cap.get(cv2.CAP_PROP_FPS))  # Ambil FPS dari video input
+        input_fps = int(cap.get(cv2.CAP_PROP_FPS))
 
-        # Inisialisasi video writer
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"avc1")
         out = cv2.VideoWriter(
             video_path, fourcc, input_fps, (frame_width, frame_height)
         )
 
-        # Hitung jumlah frame yang perlu direkam
         frames_to_capture = RECORD_DURATION * input_fps
         frames_captured = 0
 
-        # Mulai merekam
         while frames_captured < frames_to_capture:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            # Detect people using YOLO with CUDA acceleration
-            with torch.amp.autocast('cuda'):
-                results = model(frame, conf=DETECTION_THRESHOLD, device=0)  # Removed stream=True
+            with torch.amp.autocast("cuda" if cuda_available else "cpu"):
+                results = model(
+                    frame,
+                    conf=DETECTION_THRESHOLD,
+                    device=0 if cuda_available else "cpu",
+                )
 
-            # Convert YOLO results to DeepSORT format
             detections = []
-            if len(results) > 0:
-                for box in results[0].boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    confidence = float(box.conf[0])
-                    detections.append(([x1, y1, x2 - x1, y2 - y1], confidence, "person"))
+            for box in results[0].boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                confidence = float(box.conf[0])
+                detections.append(([x1, y1, x2 - x1, y2 - y1], confidence, "person"))
 
-            # Update tracker dengan deteksi terbaru
             tracks = tracker.update_tracks(detections, frame=frame)
 
-            # Proses setiap objek yang dilacak
             for track in tracks:
                 if not track.is_confirmed():
                     continue
@@ -125,24 +102,16 @@ def record_detection_video(cap, timestamp, initial_detection_duration=0):
                 track_id = track.track_id
                 ltrb = track.to_ltrb()
                 x1, y1, x2, y2 = map(int, ltrb)
-                bbox = (x1, y1, x2 - x1, x2 - y1)
-
-                # Hitung durasi deteksi
                 detection_duration = initial_detection_duration + (
                     frames_captured / input_fps
                 )
-
-                # Tentukan warna berdasarkan durasi deteksi
                 color = (
                     (0, 255, 0)
                     if detection_duration <= OVERTIME_THRESHOLD
                     else (0, 0, 255)
                 )
 
-                # Gambar bounding box
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-                # Tambahkan label, confidence score, dan timer
                 cv2.putText(
                     frame,
                     f"ID {track_id} - {str(timedelta(seconds=int(detection_duration)))}",
@@ -153,11 +122,9 @@ def record_detection_video(cap, timestamp, initial_detection_duration=0):
                     2,
                 )
 
-            # Tulis frame ke video
             out.write(frame)
             frames_captured += 1
 
-            # Tampilkan progress rekaman
             cv2.imshow("Recording Detection", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
@@ -170,33 +137,44 @@ def record_detection_video(cap, timestamp, initial_detection_duration=0):
         return None
 
 
+def alert():
+    frequency = 1000  # Set frequency to 1000 Hertz
+    duration = 1000  # Set duration to 1000 milliseconds (1 second)
+    winsound.Beep(frequency, duration)
+
+
 def process_video(input_path, id_cctv=1):
-    """
-    Memproses video untuk mendeteksi orang dan menyimpan hasil deteksi ke video.
-    """
     try:
-        # Koneksi ke database
         conn = psycopg2.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        # Buka video
-        cap = cv2.VideoCapture(input_path)
+        # Video/RTSP capture setup
+        if input_path.startswith("rtsp://"):
+            cap = cv2.VideoCapture(input_path, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        else:
+            cap = cv2.VideoCapture(input_path)
+
         if not cap.isOpened():
-            raise ValueError(f"Cannot open input video: {input_path}")
+            raise ValueError(f"Cannot open input source: {input_path}")
 
-        # Ambil frame rate video
+        # For CPU usage, consider using a smaller frame size to improve performance
+        if not cuda_available:
+            frame_width = min(
+                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), 960
+            )  # Lower resolution for CPU
+            frame_height = min(int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), 540)
+            logging.info(
+                f"Using reduced resolution ({frame_width}x{frame_height}) for CPU processing"
+            )
+
         input_fps = int(cap.get(cv2.CAP_PROP_FPS))
-
-        # Inisialisasi variabel
         start_time = datetime.now()
-        detection_start_times = (
-            {}
-        )  # Dictionary untuk menyimpan waktu mulai deteksi setiap ID
+        detection_start_times = {}
         overtime_duration = 0
-        violation_bbox = None
-        recording = False  # Flag untuk menandai apakah sedang merekam
-        video_path = None  # Path video hasil rekaman
-        frame_count = 0  # Hitung jumlah frame yang telah diproses
+        recording = False
+        video_path = None
+        frame_count = 0
 
         while True:
             ret, frame = cap.read()
@@ -204,24 +182,21 @@ def process_video(input_path, id_cctv=1):
                 break
 
             frame_count += 1
+            with torch.amp.autocast("cuda" if cuda_available else "cpu"):
+                results = model(
+                    frame,
+                    conf=DETECTION_THRESHOLD,
+                    device=0 if cuda_available else "cpu",
+                )
 
-            # Run detection with CUDA acceleration
-            with torch.amp.autocast('cuda'):
-                results = model(frame, conf=DETECTION_THRESHOLD, device=0)  # Removed stream=True
-
-            # Convert YOLO results to DeepSORT format
             detections = []
-            # Process first result since we're not streaming
-            if len(results) > 0:
-                for box in results[0].boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    confidence = float(box.conf[0])
-                    detections.append(([x1, y1, x2 - x1, y2 - y1], confidence, "person"))
+            for box in results[0].boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                confidence = float(box.conf[0])
+                detections.append(([x1, y1, x2 - x1, y2 - y1], confidence, "person"))
 
-            # Update tracker dengan deteksi terbaru
             tracks = tracker.update_tracks(detections, frame=frame)
 
-            # Proses setiap objek yang dilacak
             for track in tracks:
                 if not track.is_confirmed():
                     continue
@@ -229,22 +204,15 @@ def process_video(input_path, id_cctv=1):
                 track_id = track.track_id
                 ltrb = track.to_ltrb()
                 x1, y1, x2, y2 = map(int, ltrb)
-                bbox = (x1, y1, x2 - x1, y2 - y1)
-
-                # Jika ID belum ada dalam dictionary, tambahkan waktu mulai deteksi
                 if track_id not in detection_start_times:
                     detection_start_times[track_id] = frame_count
 
-                # Hitung durasi deteksi berdasarkan frame rate
                 detection_duration = (
                     frame_count - detection_start_times[track_id]
                 ) / input_fps
 
-                # Jika durasi deteksi melebihi OVERTIME_THRESHOLD, ubah warna bounding box menjadi merah
                 if detection_duration > OVERTIME_THRESHOLD:
                     overtime_duration = int(detection_duration)
-                    violation_bbox = bbox
-                    # Mulai merekam jika belum merekam
                     if not recording:
                         video_path = record_detection_video(
                             cap,
@@ -252,24 +220,19 @@ def process_video(input_path, id_cctv=1):
                             detection_duration,
                         )
                         recording = True
-                    # Simpan ke database
                     save_violation_to_db(cursor, id_cctv, overtime_duration, video_path)
                     conn.commit()
                     logging.info(
                         f"Pelanggaran terdeteksi: Melebihi waktu {overtime_duration} detik"
                     )
-                    detection_start_times[track_id] = (
-                        frame_count  # Reset timer untuk ID ini
-                    )
+                    alert()  # Trigger alert sound
+                    detection_start_times[track_id] = frame_count
 
-                # Tentukan warna bounding box berdasarkan durasi deteksi
                 color = (
                     (0, 255, 0)
                     if detection_duration <= OVERTIME_THRESHOLD
                     else (0, 0, 255)
                 )
-
-                # Gambar kotak, ID, dan timer
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
                     frame,
@@ -281,12 +244,10 @@ def process_video(input_path, id_cctv=1):
                     2,
                 )
 
-            # Tampilkan frame
             cv2.imshow("People Detection", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
-        # Bersihkan
         cap.release()
         cv2.destroyAllWindows()
         cursor.close()
@@ -298,5 +259,20 @@ def process_video(input_path, id_cctv=1):
 
 
 if __name__ == "__main__":
-    video_path = "video-test/people.mp4"
+    # Try RTSP stream first
+    rtsp_url = "false"  # Fixed URL format
+    
+    try:
+        test_cap = cv2.VideoCapture(rtsp_url)
+        if test_cap.isOpened():
+            test_cap.release()
+            video_path = rtsp_url
+            print(f"Using RTSP stream: {video_path}")
+        else:
+            # Fallback to test video
+            video_path = "video-test/people.mp4"
+            print(f"RTSP not available, using test video: {video_path}")
+    except:
+        print(f"RTSP error, using test video: {video_path}")
+        
     process_video(video_path)
